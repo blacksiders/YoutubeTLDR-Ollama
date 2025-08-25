@@ -1,0 +1,16 @@
+# Build artifacts
+/target/
+
+# Generated/minified assets (built by build.rs)
+/static/*.gz
+
+# Environment and OS/editor cruft
+.env
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# Local launchers/scripts
+*.bat

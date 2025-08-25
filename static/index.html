@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <title>YouTube TLDR (Ollama)</title>
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com/" crossorigin>
+    <link rel="preconnect" href="https://rsms.me/" crossorigin>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" integrity="sha512-Evv84Mr4kqVGRNSgIGL/F/aIDqQb7xQ2vcrdIwxfjThSH8CSR7PBEakCr51Ck+w+/U6swU2Im1vVX0SVk9ABhg==" crossorigin="anonymous" referrerpolicy="no-referrer" media="print" onload="this.media='all'"/>
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css" media="print" onload="this.media='all'">
+    <script type="module" src="https://md-block.verou.me/md-block.js" defer></script>
+</head>
+<body>
+    <div class="app-container">
+        <button id="menu-toggle-btn" title="Toggle Menu"><i class="fas fa-bars"></i></button>
+        <aside id="sidebar">
+            <header class="sidebar-header">
+                <button id="new-summary-btn"><i class="fas fa-plus"></i> New Summary</button>
+                <button id="close-sidebar-btn" class="icon-btn" title="Close Menu"><i class="fas fa-times"></i></button>
+            </header>
+            <section id="saved-summaries-section">
+                <h2><i class="fas fa-history"></i> History</h2>
+                <ul id="saved-summaries-list"></ul>
+            </section>
+            <footer class="sidebar-footer">
+                <button id="clear-summaries-btn"><i class="fas fa-trash-alt"></i> Clear History</button>
+            </footer>
+        </aside>
+
+        <main id="main-content">
+            <div id="welcome-view">
+                <header>
+                    <h1>YouTube TLDR (Ollama)</h1>
+                    <p id="description">Enter a YouTube URL to get a locally-generated summary using an Ollama model.</p>
+                </header>
+                <form id="summary-form">
+                    <input type="url" id="youtube-url" placeholder="https://www.youtube.com/watch?v=..." required>
+                    <button type="submit">Summarize <i class="fas fa-arrow-right"></i></button>
+                </form>
+                <details class="settings-details">
+                    <summary><i class="fas fa-cog"></i> Settings</summary>
+                    <div class="settings-content">
+                        <div>
+                            <label for="model"><i class="fas fa-brain"></i> Ollama Model</label>
+                            <input type="text" id="model" placeholder="llama3:8b">
+                        </div>
+                        <div>
+                            <label for="system-prompt"><i class="fas fa-terminal"></i> System Prompt</label>
+                            <textarea id="system-prompt" rows="6" placeholder="Enter custom instructions for the AI..."></textarea>
+                        </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="dry-run">
+                            <label for="dry-run"><i class="fas fa-flask"></i> Dry Run (show Markdown test only)</label>
+                        </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="transcript-only">
+                            <label for="transcript-only"><i class="fas fa-closed-captioning"></i> Transcript Only (skip summarization)</label>
+                        </div>
+                    </div>
+                </details>
+            </div>
+
+            <div id="summary-view" class="hidden">
+                <div id="status-container" class="hidden">
+                    <div id="loader"><div class="spinner"></div><p>Processing video and generating summary...</p></div>
+                    <p id="error-message"></p>
+                </div>
+
+                <div id="summary-container" class="hidden">
+                    <h2 id="summary-title">
+                        <i class="fa-regular fa-file-lines"></i>
+                        <span id="summary-title-text">Summary</span>
+                        <div style="width: min-content">
+                            <a id="video-link" href="#" target="_blank" class="icon-btn" title="View Video"><i class="fas fa-video"></i></a>
+                            <button id="copy-summary-btn" class="icon-btn" title="Copy Summary"><i class="fas fa-copy"></i></button>
+                        </div>
+                    </h2>
+                    <md-block id="summary-output"></md-block>
+                </div>
+
+                <div id="transcript-section" class="hidden">
+                    <details id="transcript-details">
+                        <summary>
+                            <span><i class="fas fa-scroll"></i> View Raw Transcript</span>
+                            <span class="summary-actions">
+                                <button id="copy-transcript-btn" class="icon-btn" title="Copy Transcript"><i class="fas fa-copy"></i></button>
+                            </span>
+                        </summary>
+                        <pre id="transcript-text"></pre>
+                    </details>
+                </div>
+            </div>
+        </main>
+        <div id="sidebar-overlay"></div>
+    </div>
+
+    <script src="script.js" defer></script>
+</body>
+</html>
