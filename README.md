@@ -30,7 +30,7 @@ macOS/Linux:
 TLDR_IP=127.0.0.1 TLDR_PORT=8001 TLDR_WORKERS=4 OLLAMA_BASE_URL=http://127.0.0.1:11434 \
   ./target/release/YouTubeTLDR-Ollama
 ```
-Open http://127.0.0.1:8001 and use the Settings to pick an Ollama model (default `llama3:8b`).
+Open http://127.0.0.1:8001 and use the Settings to pick an Ollama model (default `gpt-oss:20b`).
 
 ## Notes
 - This version summarizes from the YouTube transcript only.

@@ -8,10 +8,40 @@ document.addEventListener('DOMContentLoaded', () => {
             transcriptOnly: 'ollama-tldr-transcript-only',
             summaries: 'ollama-tldr-summaries'
         },
-        defaults: {
-            model: 'llama3:8b',
-            systemPrompt: "You are an expert video summarizer. Given a YouTube transcript, produce a factual, well-structured markdown summary with headings and bullet points. Bold key terms and remove filler/ads."
-        }
+          defaults: {
+                model: 'gpt-oss:20b',
+                systemPrompt: `You are an expert video summarizer. Given a raw YouTube transcript (and optionally the video title), produce a debate‑ready Markdown summary that captures the speaker’s core thesis, structure, and evidence without adding facts that aren’t in the transcript.
+
+Tone and perspective:
+- Use a neutral narrator voice: refer to the narrator as “the speaker” (e.g., “The speaker argues…”).
+- Preserve the speaker’s stance and rhetoric, but do not editorialize or inject new claims.
+- If something is not mentioned, say “Not mentioned” instead of guessing.
+
+Output format (Markdown only):
+1) Start with a punchy H2 title that captures the thesis.
+    - Format: “## {Concise, compelling title reflecting the main claim}”
+2) One short opening paragraph (2–3 sentences) that frames the overall argument.
+3) 3–6 H3 sections with clear, descriptive headings that organize the content.
+    - For each section:
+      - 1–2 concise paragraphs.
+      - Follow with bullet points using “* ”. Bold key terms and claims like **Bitcoin**, **employment**, **risk**, **status**, **leverage**, etc.
+      - Where helpful, add a short numbered list (1.–3.) for steps/frameworks.
+4) If the transcript includes critiques of alternatives or comparisons, include a separate section summarizing them (e.g., “### Critique of {X}”).
+5) If practical steps are given, include a short “### Actionable Steps” section.
+6) If risks, caveats, timelines, metrics, or quotes appear, preserve them verbatim (use inline quotes for short lines, blockquotes for longer).
+7) End cleanly without a generic conclusion if it repeats content.
+
+Style constraints:
+- Use bold to highlight crucial terms and takeaways (not entire sentences).
+- Keep factual fidelity: do not add numbers, timelines, or names that aren’t in the transcript.
+- Prefer concrete details (figures, dates, specific names) when present.
+- Remove ads/sponsors, filler, repeated phrases, and irrelevant tangents.
+- Length target: ~300–700 words for typical videos; go longer only if the transcript is dense.
+
+Safety/accuracy:
+- If the transcript is incomplete or ambiguous, note “Not mentioned,” “Unclear,” or “Ambiguous” where appropriate.
+- Do not invent references, links, or sources.`
+          }
     };
 
     const dom = {
@@ -61,6 +91,8 @@ document.addEventListener('DOMContentLoaded', () => {
         },
         addEventListeners() {
             dom.form.addEventListener('submit', this.handleFormSubmit.bind(this));
+            // Populate models datalist on load
+            this.populateModels();
             dom.clearSummariesBtn.addEventListener('click', this.handleClearSummaries.bind(this));
             dom.newSummaryBtn.addEventListener('click', this.handleNewSummary.bind(this));
             dom.savedSummariesList.addEventListener('click', this.handleSidebarClick.bind(this));
@@ -83,6 +115,17 @@ document.addEventListener('DOMContentLoaded', () => {
             dom.systemPrompt.value = localStorage.getItem(config.storageKeys.systemPrompt) || config.defaults.systemPrompt;
             dom.dryRun.checked = localStorage.getItem(config.storageKeys.dryRun) === 'true';
             dom.transcriptOnly.checked = localStorage.getItem(config.storageKeys.transcriptOnly) === 'true';
+        },
+        async populateModels() {
+            try {
+                const res = await fetch(`${config.baseURL}/api/models`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const models = Array.isArray(data.models) ? data.models : [];
+                const dl = document.getElementById('models-list');
+                if (!dl) return;
+                dl.innerHTML = models.map(m => `<option value="${this.escapeHtml(m)}"></option>`).join('');
+            } catch {}
         },
         saveSettings() {
             localStorage.setItem(config.storageKeys.model, dom.model.value);

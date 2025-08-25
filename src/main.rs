@@ -158,6 +158,10 @@ fn handle_get(request_line: &[u8], stream: &mut TcpStream) -> io::Result<()> {
         b"/" | b"/index.html" => write_static_response(stream, "text/html", HTML_RESPONSE),
         b"/style.css" => write_static_response(stream, "text/css", CSS_RESPONSE),
         b"/script.js" => write_static_response(stream, "application/javascript", JS_RESPONSE),
+        b"/api/models" => {
+            let body = get_ollama_models_json();
+            write_response(stream, "200 OK", "application/json", body.as_bytes())
+        }
         _ => write_error_response(stream, "404 Not Found", "Not Found"),
     }
 }
@@ -183,12 +187,46 @@ fn perform_summary_work(req: SummarizeRequest) -> Result<SummarizeResponse, Stri
         });
     }
 
-    let model = req.model.as_deref().filter(|m| !m.is_empty()).ok_or("Missing Ollama model name (e.g. qwen2-vl:7b or llama3.1:8b)")?;
-    let system_prompt = req.system_prompt.unwrap_or_else(|| "You are a helpful assistant that summarizes YouTube transcripts into concise, structured markdown with headings and bullet points. Focus on factual fidelity and key takeaways.".to_string());
+    let model = req
+        .model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "gpt-oss:20b".to_string());
+    let system_prompt = req.system_prompt.unwrap_or_else(|| r#"You are an expert video summarizer. Given a raw YouTube transcript (and optionally the video title), produce a debate‑ready Markdown summary that captures the speaker’s core thesis, structure, and evidence without adding facts that aren’t in the transcript.
+
+Tone and perspective:
+- Use a neutral narrator voice: refer to the narrator as “the speaker” (e.g., “The speaker argues…”).
+- Preserve the speaker’s stance and rhetoric, but do not editorialize or inject new claims.
+- If something is not mentioned, say “Not mentioned” instead of guessing.
+
+Output format (Markdown only):
+1) Start with a punchy H2 title that captures the thesis.
+   - Format: “## {Concise, compelling title reflecting the main claim}”
+2) One short opening paragraph (2–3 sentences) that frames the overall argument.
+3) 3–6 H3 sections with clear, descriptive headings that organize the content.
+   - For each section:
+     - 1–2 concise paragraphs.
+     - Follow with bullet points using “* ”. Bold key terms and claims like **Bitcoin**, **employment**, **risk**, **status**, **leverage**, etc.
+     - Where helpful, add a short numbered list (1.–3.) for steps/frameworks.
+4) If the transcript includes critiques of alternatives or comparisons, include a separate section summarizing them (e.g., “### Critique of {X}”).
+5) If practical steps are given, include a short “### Actionable Steps” section.
+6) If risks, caveats, timelines, metrics, or quotes appear, preserve them verbatim (use inline quotes for short lines, blockquotes for longer).
+7) End cleanly without a generic conclusion if it repeats content.
+
+Style constraints:
+- Use bold to highlight crucial terms and takeaways (not entire sentences).
+- Keep factual fidelity: do not add numbers, timelines, or names that aren’t in the transcript.
+- Prefer concrete details (figures, dates, specific names) when present.
+- Remove ads/sponsors, filler, repeated phrases, and irrelevant tangents.
+- Length target: ~300–700 words for typical videos; go longer only if the transcript is dense.
+
+Safety/accuracy:
+- If the transcript is incomplete or ambiguous, note “Not mentioned,” “Unclear,” or “Ambiguous” where appropriate.
+- Do not invent references, links, or sources."#
+        .to_string());
 
     let base_url = env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
 
-    let summary = ollama::summarize(&base_url, model, &system_prompt, &transcript)
+    let summary = ollama::summarize(&base_url, &model, &system_prompt, &transcript)
         .map_err(|e| format!("Ollama error: {}", e))?;
 
     Ok(SummarizeResponse {
@@ -272,4 +310,24 @@ fn read_body(
     }
 
     Ok(body)
+}
+
+fn get_ollama_models_json() -> String {
+    let base_url = env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+    let tags_url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(resp) = minreq::get(tags_url).with_timeout(5).send() {
+        if resp.status_code >= 200 && resp.status_code < 300 {
+            if let Ok(v) = resp.json::<serde_json::Value>() {
+                if let Some(arr) = v.get("models").and_then(|m| m.as_array()) {
+                    for item in arr {
+                        if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                            names.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    serde_json::to_string(&serde_json::json!({ "models": names })).unwrap_or_else(|_| "{\"models\":[]}".to_string())
 }
