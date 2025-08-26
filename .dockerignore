@@ -1,0 +1,10 @@
+target
+.git
+.gitignore
+.vscode
+.idea
+*.log
+*.bat
+static/*.gz
+.DS_Store
+Thumbs.db
