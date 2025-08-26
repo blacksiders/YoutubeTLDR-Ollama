@@ -9,18 +9,27 @@ use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Deserialize)]
 struct SummarizeRequest {
     url: String,
+    #[serde(default)]
     api_key: Option<String>,           // unused for Ollama; kept for UI compatibility
+    #[serde(default)]
     model: Option<String>,             // ollama model name
+    #[serde(default)]
     system_prompt: Option<String>,
+    #[serde(default)]
     dry_run: bool,
+    #[serde(default)]
     transcript_only: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct SummarizeResponse {
     summary: String,
     subtitles: String,
@@ -147,6 +156,30 @@ fn handle_request(stream: &mut TcpStream) -> io::Result<()> {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JSON serialization error: {}", e)))?;
 
         write_response(stream, "200 OK", "application/json", response_body.as_bytes())
+    } else if request_line.starts_with(b"POST /api/submit") {
+        // background job submission
+        let content_length = get_content_length(request_data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Content-Length header is required for POST"))?;
+
+        if content_length > MAX_BODY_SIZE { return Err(io::Error::new(io::ErrorKind::InvalidData, "Request body too large")); }
+
+        let body = read_body(initial_body, content_length, stream)?;
+        let req: SummarizeRequest = serde_json::from_slice(&body)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("JSON deserialization error: {}", e)))?;
+
+    let job_id = new_job_id();
+    insert_job_pending(&job_id);
+    let job_id_for_thread = job_id.clone();
+    thread::spawn(move || {
+            let result = perform_summary_work(req);
+            match result {
+        Ok(resp) => set_job_done(&job_id_for_thread, resp),
+        Err(err) => set_job_error(&job_id_for_thread, err),
+            }
+        });
+
+    let body = serde_json::json!({"job_id": job_id}).to_string();
+        write_response(stream, "200 OK", "application/json", body.as_bytes())
     } else {
         write_error_response(stream, "404 Not Found", "Not Found")
     }
@@ -154,12 +187,32 @@ fn handle_request(stream: &mut TcpStream) -> io::Result<()> {
 
 fn handle_get(request_line: &[u8], stream: &mut TcpStream) -> io::Result<()> {
     let path = request_line.split(|&b| b == b' ').nth(1).unwrap_or(b"/");
-    match path {
+    // split off query string if present
+    let (route, query) = match path.split(|&b| b == b'?').collect::<Vec<_>>().as_slice() {
+        [r] => (*r, b"".as_slice()),
+        [r, q, ..] => (*r, *q),
+        _ => (path, b"".as_slice()),
+    };
+
+    match route {
         b"/" | b"/index.html" => write_static_response(stream, "text/html", HTML_RESPONSE),
         b"/style.css" => write_static_response(stream, "text/css", CSS_RESPONSE),
         b"/script.js" => write_static_response(stream, "application/javascript", JS_RESPONSE),
         b"/api/models" => {
             let body = get_ollama_models_json();
+            write_response(stream, "200 OK", "application/json", body.as_bytes())
+        }
+        b"/api/job" => {
+            let query_str = std::str::from_utf8(query).unwrap_or("");
+            // accept either id=... or job_id=...
+            let job_id = query_str
+                .strip_prefix("id=")
+                .or_else(|| query_str.strip_prefix("job_id="))
+                .unwrap_or("");
+            if job_id.is_empty() {
+                return write_error_response(stream, "400 Bad Request", "Missing id parameter");
+            }
+            let body = get_job_status_json(job_id);
             write_response(stream, "200 OK", "application/json", body.as_bytes())
         }
         _ => write_error_response(stream, "404 Not Found", "Not Found"),
@@ -191,42 +244,45 @@ fn perform_summary_work(req: SummarizeRequest) -> Result<SummarizeResponse, Stri
         .model
         .filter(|m| !m.trim().is_empty())
         .unwrap_or_else(|| "gpt-oss:20b".to_string());
-    let system_prompt = req.system_prompt.unwrap_or_else(|| r#"You are an expert video summarizer. Given a raw YouTube transcript (and optionally the video title), produce a debate‑ready Markdown summary that captures the speaker’s core thesis, structure, and evidence without adding facts that aren’t in the transcript.
+    let system_prompt = req.system_prompt.unwrap_or_else(|| r####"You are an expert video summarizer. Given a raw YouTube transcript (and optionally the video title), produce a debate-ready Markdown summary that captures the speaker's core thesis, structure, and evidence without adding facts that aren't in the transcript.
 
 Tone and perspective:
-- Use a neutral narrator voice: refer to the narrator as “the speaker” (e.g., “The speaker argues…”).
-- Preserve the speaker’s stance and rhetoric, but do not editorialize or inject new claims.
-- If something is not mentioned, say “Not mentioned” instead of guessing.
+- Use a neutral narrator voice: refer to the narrator as "the speaker" (e.g., "The speaker argues...").
+- Preserve the speaker's stance and rhetoric, but do not editorialize or inject new claims.
+- If something is not mentioned, say "Not mentioned" instead of guessing.
 
 Output format (Markdown only):
 1) Start with a punchy H2 title that captures the thesis.
-   - Format: “## {Concise, compelling title reflecting the main claim}”
+    - Format: "## {Concise, compelling title reflecting the main claim}"
 2) One short opening paragraph (2–3 sentences) that frames the overall argument.
 3) 3–6 H3 sections with clear, descriptive headings that organize the content.
-   - For each section:
-     - 1–2 concise paragraphs.
-     - Follow with bullet points using “* ”. Bold key terms and claims like **Bitcoin**, **employment**, **risk**, **status**, **leverage**, etc.
-     - Where helpful, add a short numbered list (1.–3.) for steps/frameworks.
-4) If the transcript includes critiques of alternatives or comparisons, include a separate section summarizing them (e.g., “### Critique of {X}”).
-5) If practical steps are given, include a short “### Actionable Steps” section.
+    - For each section:
+      - 1–2 concise paragraphs.
+      - Follow with bullet points using "* ". Bold key terms and claims like **Bitcoin**, **employment**, **risk**, **status**, **leverage**, etc.
+      - Where helpful, add a short numbered list (1.–3.) for steps/frameworks.
+4) If the transcript includes critiques of alternatives or comparisons, include a separate section summarizing them (e.g., "### Critique of {X}").
+5) If practical steps are given, include a short "### Actionable Steps" section.
 6) If risks, caveats, timelines, metrics, or quotes appear, preserve them verbatim (use inline quotes for short lines, blockquotes for longer).
 7) End cleanly without a generic conclusion if it repeats content.
 
 Style constraints:
+- Do not use tables. Use headings, paragraphs, and bullet lists only.
 - Use bold to highlight crucial terms and takeaways (not entire sentences).
-- Keep factual fidelity: do not add numbers, timelines, or names that aren’t in the transcript.
+- Keep factual fidelity: do not add numbers, timelines, or names that aren't in the transcript.
 - Prefer concrete details (figures, dates, specific names) when present.
 - Remove ads/sponsors, filler, repeated phrases, and irrelevant tangents.
 - Length target: ~300–700 words for typical videos; go longer only if the transcript is dense.
 
 Safety/accuracy:
-- If the transcript is incomplete or ambiguous, note “Not mentioned,” “Unclear,” or “Ambiguous” where appropriate.
-- Do not invent references, links, or sources."#
-        .to_string());
+- If the transcript is incomplete or ambiguous, note "Not mentioned," "Unclear," or "Ambiguous" where appropriate.
+- Do not invent references, links, or sources.
+- Do not give prescriptive financial, medical, or legal advice; only summarize what the speaker says."####
+          .to_string());
 
     let base_url = env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
 
-    let summary = ollama::summarize(&base_url, &model, &system_prompt, &transcript)
+    let user_content = format!("Title: {}\n\nTranscript:\n{}", video_name, transcript);
+    let summary = ollama::summarize(&base_url, &model, &system_prompt, &user_content)
         .map_err(|e| format!("Ollama error: {}", e))?;
 
     Ok(SummarizeResponse {
@@ -330,4 +386,53 @@ fn get_ollama_models_json() -> String {
         }
     }
     serde_json::to_string(&serde_json::json!({ "models": names })).unwrap_or_else(|_| "{\"models\":[]}".to_string())
+}
+
+// ---------- Background Jobs ----------
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "status", rename_all = "lowercase")]
+enum JobStatus {
+    Pending,
+    Done { result: SummarizeResponse },
+    Error { error: String },
+}
+
+static JOBS: OnceLock<Mutex<HashMap<String, JobStatus>>> = OnceLock::new();
+static JOB_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn jobs_map() -> &'static Mutex<HashMap<String, JobStatus>> {
+    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn new_job_id() -> String {
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let n = JOB_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("job-{}-{}", ts, n)
+}
+
+fn insert_job_pending(id: &str) {
+    if let Ok(mut map) = jobs_map().lock() {
+        map.insert(id.to_string(), JobStatus::Pending);
+    }
+}
+
+fn set_job_done(id: &str, result: SummarizeResponse) {
+    if let Ok(mut map) = jobs_map().lock() {
+        map.insert(id.to_string(), JobStatus::Done { result });
+    }
+}
+
+fn set_job_error(id: &str, error: String) {
+    if let Ok(mut map) = jobs_map().lock() {
+        map.insert(id.to_string(), JobStatus::Error { error });
+    }
+}
+
+fn get_job_status_json(id: &str) -> String {
+    let status = if let Ok(map) = jobs_map().lock() { map.get(id).cloned() } else { None };
+    match status {
+        Some(s) => serde_json::to_string(&s).unwrap_or_else(|_| "{\"status\":\"error\",\"error\":\"serialization\"}".to_string()),
+        None => "{\"status\":\"error\",\"error\":\"not_found\"}".to_string(),
+    }
 }

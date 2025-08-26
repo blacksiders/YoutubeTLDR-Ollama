@@ -32,6 +32,7 @@ Output format (Markdown only):
 7) End cleanly without a generic conclusion if it repeats content.
 
 Style constraints:
+- Do not use tables. Use headings, paragraphs, and bullet lists only.
 - Use bold to highlight crucial terms and takeaways (not entire sentences).
 - Keep factual fidelity: do not add numbers, timelines, or names that aren’t in the transcript.
 - Prefer concrete details (figures, dates, specific names) when present.
@@ -40,7 +41,8 @@ Style constraints:
 
 Safety/accuracy:
 - If the transcript is incomplete or ambiguous, note “Not mentioned,” “Unclear,” or “Ambiguous” where appropriate.
-- Do not invent references, links, or sources.`
+- Do not invent references, links, or sources.
+- Do not give prescriptive financial, medical, or legal advice; only summarize what the speaker says.`
           }
     };
 
@@ -101,6 +103,14 @@ Safety/accuracy:
             [dom.menuToggleBtn, dom.closeSidebarBtn, dom.sidebarOverlay].forEach(el => el && el.addEventListener('click', () => this.toggleSidebar()));
             [dom.model, dom.systemPrompt].forEach(el => el.addEventListener('change', this.saveSettings));
             [dom.dryRun, dom.transcriptOnly].forEach(el => el.addEventListener('change', this.saveSettings));
+                const rs = document.getElementById('reset-settings-btn');
+                if (rs) rs.addEventListener('click', () => {
+                    localStorage.removeItem(config.storageKeys.model);
+                    localStorage.removeItem(config.storageKeys.systemPrompt);
+                    localStorage.removeItem(config.storageKeys.dryRun);
+                    localStorage.removeItem(config.storageKeys.transcriptOnly);
+                    this.loadSettings(); this.render();
+                });
         },
         loadSummaries() {
             state.summaries = JSON.parse(localStorage.getItem(config.storageKeys.summaries)) || [];
@@ -140,7 +150,8 @@ Safety/accuracy:
             this.saveSettings();
             state.isLoading = true; state.error = null; state.activeSummaryIndex = -1; this.render();
             try {
-                const response = await fetch(`${config.baseURL}/api/summarize`, {
+                // Submit as background job and poll
+                const response = await fetch(`${config.baseURL}/api/submit`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         url,
@@ -150,12 +161,32 @@ Safety/accuracy:
                         transcript_only: dom.transcriptOnly.checked,
                     }),
                 });
-                const txt = await response.text();
-                if (!response.ok) throw new Error(txt || `Server error: ${response.status}`);
-                const data = JSON.parse(txt);
-                const newSummary = { name: data.video_name, summary: data.summary, transcript: data.subtitles, url };
-                state.summaries.unshift(newSummary);
-                state.activeSummaryIndex = 0;
+                const submitTxt = await response.text();
+                if (!response.ok) throw new Error(submitTxt || `Server error: ${response.status}`);
+                const { job_id } = JSON.parse(submitTxt);
+                const start = Date.now();
+                let lastMsg = '';
+                while (true) {
+                    await new Promise(r => setTimeout(r, 1500));
+                    const jr = await fetch(`${config.baseURL}/api/job?id=${encodeURIComponent(job_id)}`, { cache: 'no-store' });
+                    const jtxt = await jr.text();
+                    if (!jr.ok) throw new Error(jtxt || `Job error: ${jr.status}`);
+                    const payload = JSON.parse(jtxt);
+                    if (payload.status === 'pending') {
+                        const secs = Math.floor((Date.now()-start)/1000);
+                        const msg = `Working... ${secs}s`;
+                        if (msg !== lastMsg) { dom.loader.querySelector('p').textContent = msg; lastMsg = msg; }
+                        continue;
+                    }
+                    if (payload.status === 'error') throw new Error(payload.error || 'Unknown error');
+                    if (payload.status === 'done' || payload.status === 'Done') {
+                        const data = payload.result || payload;
+                        const newSummary = { name: data.video_name, summary: data.summary, transcript: data.subtitles, url };
+                        state.summaries.unshift(newSummary);
+                        state.activeSummaryIndex = 0;
+                        break;
+                    }
+                }
             } catch (err) {
                 console.error('Summarization failed:', err);
                 state.error = err.message || String(err);
