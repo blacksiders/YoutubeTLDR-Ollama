@@ -79,6 +79,7 @@
                         <div style="width: min-content">
                             <a id="video-link" href="#" target="_blank" class="icon-btn" title="View Video"><i class="fas fa-video"></i></a>
                             <button id="copy-summary-btn" class="icon-btn" title="Copy Summary"><i class="fas fa-copy"></i></button>
+                            <button id="generate-script-btn" class="icon-btn" title="Generate YouTube Script"><i class="fas fa-scroll"></i></button>
                         </div>
                     </h2>
                     <md-block id="summary-output"></md-block>
@@ -93,6 +94,18 @@
                             </span>
                         </summary>
                         <pre id="transcript-text"></pre>
+                    </details>
+                </div>
+
+                <div id="script-section" class="hidden">
+                    <details id="script-details" open>
+                        <summary>
+                            <span><i class="fas fa-clapperboard"></i> Generated YouTube Script</span>
+                            <span class="summary-actions">
+                                <button id="copy-script-btn" class="icon-btn" title="Copy Script"><i class="fas fa-copy"></i></button>
+                            </span>
+                        </summary>
+                        <md-block id="script-output"></md-block>
                     </details>
                 </div>
             </div>

@@ -69,10 +69,14 @@ Safety/accuracy:
         summaryContainer: document.getElementById('summary-container'),
         summaryTitleText: document.getElementById('summary-title-text'),
         summaryOutput: document.getElementById('summary-output'),
+    scriptSection: document.getElementById('script-section'),
+    scriptOutput: document.getElementById('script-output'),
         transcriptSection: document.getElementById('transcript-section'),
         transcriptText: document.getElementById('transcript-text'),
         copySummaryBtn: document.getElementById('copy-summary-btn'),
         copyTranscriptBtn: document.getElementById('copy-transcript-btn'),
+    generateScriptBtn: document.getElementById('generate-script-btn'),
+    copyScriptBtn: document.getElementById('copy-script-btn'),
         videoLink: document.getElementById('video-link'),
         apiKeyContainer: document.getElementById('api-key-container')
     };
@@ -100,6 +104,8 @@ Safety/accuracy:
             dom.savedSummariesList.addEventListener('click', this.handleSidebarClick.bind(this));
             dom.copySummaryBtn.addEventListener('click', (e) => this.handleCopyClick(e, dom.summaryOutput.mdContent, dom.copySummaryBtn));
             dom.copyTranscriptBtn.addEventListener('click', (e) => this.handleCopyClick(e, dom.transcriptText.textContent, dom.copyTranscriptBtn));
+            if (dom.generateScriptBtn) dom.generateScriptBtn.addEventListener('click', this.handleGenerateScript.bind(this));
+            if (dom.copyScriptBtn) dom.copyScriptBtn.addEventListener('click', (e) => this.handleCopyClick(e, dom.scriptOutput.mdContent, dom.copyScriptBtn));
             [dom.menuToggleBtn, dom.closeSidebarBtn, dom.sidebarOverlay].forEach(el => el && el.addEventListener('click', () => this.toggleSidebar()));
             [dom.model, dom.systemPrompt].forEach(el => el.addEventListener('change', this.saveSettings));
             [dom.dryRun, dom.transcriptOnly].forEach(el => el.addEventListener('change', this.saveSettings));
@@ -225,6 +231,7 @@ Safety/accuracy:
             err.textContent = state.error || '';
             document.getElementById('summary-container').classList.toggle('hidden', !cur || hasStatus);
             document.getElementById('transcript-section').classList.toggle('hidden', true);
+            dom.scriptSection.classList.add('hidden');
             if (cur) {
                 document.getElementById('summary-title-text').textContent = cur.name;
                 document.getElementById('video-link').href = cur.url;
@@ -233,8 +240,61 @@ Safety/accuracy:
                     document.getElementById('transcript-text').textContent = cur.transcript;
                     document.getElementById('transcript-section').classList.remove('hidden');
                 }
+                if (cur.script && cur.script.trim()) {
+                    dom.scriptOutput.mdContent = cur.script;
+                    dom.scriptSection.classList.remove('hidden');
+                }
             }
             this.renderSidebarList();
+        },
+        async handleGenerateScript() {
+            const cur = state.summaries[state.activeSummaryIndex];
+            if (!cur) return;
+            // Submit script job
+            state.isLoading = true; state.error = null; this.render();
+            try {
+                const payload = {
+                    summary: cur.summary,
+                    transcript: cur.transcript || '',
+                    video_name: cur.name || '',
+                    model: dom.model.value,
+                    system_prompt: undefined
+                };
+                const res = await fetch(`${config.baseURL}/api/submit_script`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const rtxt = await res.text();
+                if (!res.ok) throw new Error(rtxt || `Server error: ${res.status}`);
+                const { job_id } = JSON.parse(rtxt);
+                const start = Date.now();
+                let lastMsg = '';
+                while (true) {
+                    await new Promise(r => setTimeout(r, 1500));
+                    const jr = await fetch(`${config.baseURL}/api/job?id=${encodeURIComponent(job_id)}`, { cache: 'no-store' });
+                    const jtxt = await jr.text();
+                    if (!jr.ok) throw new Error(jtxt || `Job error: ${jr.status}`);
+                    const payload = JSON.parse(jtxt);
+                    if (payload.status === 'pending') {
+                        const secs = Math.floor((Date.now()-start)/1000);
+                        const msg = `Working... ${secs}s`;
+                        if (msg !== lastMsg) { dom.loader.querySelector('p').textContent = msg; lastMsg = msg; }
+                        continue;
+                    }
+                    if (payload.status === 'error') throw new Error(payload.error || 'Unknown error');
+                    if (payload.status === 'done' || payload.status === 'Done') {
+                        const data = payload.result || payload;
+                        const script = data.script || data.summary || '';
+                        state.summaries[state.activeSummaryIndex] = { ...cur, script };
+                        break;
+                    }
+                }
+            } catch (err) {
+                console.error('Script generation failed:', err);
+                state.error = err.message || String(err);
+            } finally {
+                state.isLoading = false; this.saveSummaries();
+            }
         },
         renderSidebarList() {
             const list = document.getElementById('saved-summaries-list');

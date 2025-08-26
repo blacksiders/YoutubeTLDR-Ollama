@@ -173,12 +173,40 @@ fn handle_request(stream: &mut TcpStream) -> io::Result<()> {
     thread::spawn(move || {
             let result = perform_summary_work(req);
             match result {
-        Ok(resp) => set_job_done(&job_id_for_thread, resp),
+        Ok(resp) => {
+            let val = serde_json::to_value(&resp).unwrap_or(serde_json::json!({"error":"serialization"}));
+            set_job_done(&job_id_for_thread, val)
+        },
         Err(err) => set_job_error(&job_id_for_thread, err),
             }
         });
 
     let body = serde_json::json!({"job_id": job_id}).to_string();
+        write_response(stream, "200 OK", "application/json", body.as_bytes())
+    } else if request_line.starts_with(b"POST /api/submit_script") {
+        // background job to generate a YouTube script from an existing summary + transcript
+        let content_length = get_content_length(request_data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Content-Length header is required for POST"))?;
+        if content_length > MAX_BODY_SIZE { return Err(io::Error::new(io::ErrorKind::InvalidData, "Request body too large")); }
+        let body = read_body(initial_body, content_length, stream)?;
+        let req: ScriptRequest = serde_json::from_slice(&body)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("JSON deserialization error: {}", e)))?;
+
+        let job_id = new_job_id();
+        insert_job_pending(&job_id);
+        let job_id_for_thread = job_id.clone();
+        thread::spawn(move || {
+            let result = perform_script_work(req);
+            match result {
+                Ok(resp) => {
+                    let val = serde_json::to_value(&resp).unwrap_or(serde_json::json!({"error":"serialization"}));
+                    set_job_done(&job_id_for_thread, val)
+                },
+                Err(err) => set_job_error(&job_id_for_thread, err),
+            }
+        });
+
+        let body = serde_json::json!({"job_id": job_id}).to_string();
         write_response(stream, "200 OK", "application/json", body.as_bytes())
     } else {
         write_error_response(stream, "404 Not Found", "Not Found")
@@ -394,7 +422,7 @@ fn get_ollama_models_json() -> String {
 #[serde(tag = "status", rename_all = "lowercase")]
 enum JobStatus {
     Pending,
-    Done { result: SummarizeResponse },
+    Done { result: serde_json::Value },
     Error { error: String },
 }
 
@@ -417,7 +445,7 @@ fn insert_job_pending(id: &str) {
     }
 }
 
-fn set_job_done(id: &str, result: SummarizeResponse) {
+fn set_job_done(id: &str, result: serde_json::Value) {
     if let Ok(mut map) = jobs_map().lock() {
         map.insert(id.to_string(), JobStatus::Done { result });
     }
@@ -427,6 +455,75 @@ fn set_job_error(id: &str, error: String) {
     if let Ok(mut map) = jobs_map().lock() {
         map.insert(id.to_string(), JobStatus::Error { error });
     }
+}
+
+// ---------- Script generation ----------
+
+#[derive(Deserialize)]
+struct ScriptRequest {
+    summary: String,
+    #[serde(default)]
+    transcript: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    video_name: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct ScriptResponse {
+    script: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    video_name: Option<String>,
+}
+
+fn default_script_system_prompt() -> String {
+    r####"You are a professional YouTube scriptwriter. Using ONLY the provided summary (and transcript for fidelity), write a complete voiceover script that could be read verbatim. Do not invent facts; if details are missing, indicate "Not mentioned". Keep the speaker's stance neutral unless the transcript clearly states otherwise.
+
+Output constraints:
+- Markdown only. No tables.
+- Structure the script with clear sections and smooth transitions:
+  1) ## Hook — a compelling opener (2–4 sentences) that frames the core claim.
+  2) ## Setup — brief context and what viewers will get.
+  3) 3–6 sections (### {short heading}) delivering the content step by step.
+     - Use short, spoken-language sentences.
+     - Where relevant, include on-screen text cues in [brackets] and quick B‑roll suggestions in (parentheses).
+  4) ## Recap — summarize the key ideas without adding new claims.
+  5) ## CTA (if present in transcript) — reflect the speaker’s authentic call-to-action; otherwise omit.
+
+Style rules:
+- Concise, conversational voice; avoid fluff and filler.
+- Do not add financial, medical, or legal advice; only reflect what’s in the transcript.
+- Prefer concrete details; if ambiguous or missing, say "Not mentioned".
+"####
+        .to_string()
+}
+
+fn perform_script_work(req: ScriptRequest) -> Result<ScriptResponse, String> {
+    let model = req
+        .model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "gpt-oss:20b".to_string());
+    let system_prompt = req
+        .system_prompt
+        .unwrap_or_else(default_script_system_prompt);
+
+    let base_url = env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+
+    // Provide both the summary and transcript for fidelity; the model is instructed to prioritize summary structure but not invent facts.
+    let user_content = format!(
+        "Video Title: {title}\n\nSummary:\n{summary}\n\nTranscript (for fidelity):\n{transcript}",
+        title = req.video_name.as_deref().unwrap_or("(Unknown)"),
+        summary = req.summary,
+        transcript = req.transcript
+    );
+
+    let script = crate::ollama::summarize(&base_url, &model, &system_prompt, &user_content)
+        .map_err(|e| format!("Ollama error: {}", e))?;
+
+    Ok(ScriptResponse { script, video_name: req.video_name })
 }
 
 fn get_job_status_json(id: &str) -> String {
